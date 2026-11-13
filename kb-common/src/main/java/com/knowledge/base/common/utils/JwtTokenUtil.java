@@ -98,6 +98,7 @@ public class JwtTokenUtil {
 
         return Jwts.builder()
                 .claims(claims)
+                .id(java.util.UUID.randomUUID().toString())
                 .subject(String.valueOf(userId))
                 .issuer(jwtConfig.getIssuer())
                 .issuedAt(now)

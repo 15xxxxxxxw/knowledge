@@ -25,8 +25,6 @@ import com.knowledge.base.document.utils.UserContext;
 import com.knowledge.base.document.vo.DocumentReviewVO;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.amqp.rabbit.connection.CorrelationData;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import com.knowledge.base.common.config.SystemConfigCache;
 import com.knowledge.base.common.config.InstanceIdentifier;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -39,7 +37,6 @@ import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
@@ -77,7 +74,7 @@ public class DocumentReviewServiceImpl extends ServiceImpl<DocumentReviewMapper,
     private SearchIndexFeignClient searchIndexFeignClient;
 
     @Resource
-    private RabbitTemplate rabbitTemplate;
+    private com.knowledge.base.document.service.ReviewOutboxService reviewOutboxService;
 
     @Resource
     private ThreadPoolTaskExecutor asyncTaskExecutor;
@@ -102,7 +99,7 @@ public class DocumentReviewServiceImpl extends ServiceImpl<DocumentReviewMapper,
         }
 
         // 检查文档是否存在
-        Document document = documentMapper.selectById(documentId);
+        Document document = documentMapper.lockDocument(documentId);
         if (document == null) {
             throw new BusinessException("文档不存在");
         }
@@ -130,6 +127,7 @@ public class DocumentReviewServiceImpl extends ServiceImpl<DocumentReviewMapper,
         DocumentReview review = new DocumentReview();
         review.setId(SnowflakeIdGenerator.getInstance().nextId());
         review.setDocumentId(documentId);
+        review.setContentRevision(document.getContentId());
         review.setReviewerId(null);
         review.setReviewerName(null);
         review.setReviewResult(null);
@@ -162,14 +160,13 @@ public class DocumentReviewServiceImpl extends ServiceImpl<DocumentReviewMapper,
                     .timestamp(LocalDateTime.now())
                     .build();
             String rk = reviewRoutingKey("submitted");
-            CorrelationData correlationData = new CorrelationData(
-                    "review-SUBMITTED-" + documentId + "-" + UUID.randomUUID().toString().substring(0, 8));
-            rabbitTemplate.convertAndSend(REVIEW_EXCHANGE, rk, event, correlationData);
-            log.info("已发布审核提交事件：documentId={}, title={}, authorId={}, exchange={}, routingKey={}",
+            reviewOutboxService.enqueue(rk, event);
+            log.info("已保存审核提交事件：documentId={}, title={}, authorId={}, exchange={}, routingKey={}",
                     documentId, document.getTitle(), document.getAuthorId(), REVIEW_EXCHANGE, rk);
         } catch (Exception e) {
-            log.warn("发布审核提交事件失败（不影响审核流程）：documentId={}, error={}",
+            log.error("审核事件落库失败：documentId={}, error={}",
                     documentId, e.getMessage());
+            throw new BusinessException("审核事件保存失败");
         }
 
         return true;
@@ -192,6 +189,11 @@ public class DocumentReviewServiceImpl extends ServiceImpl<DocumentReviewMapper,
 
         if (review.getReviewResult() != null) {
             throw new BusinessException("该记录已审核");
+        }
+
+        Document locked = documentMapper.lockDocument(review.getDocumentId());
+        if (locked == null || review.getContentRevision() == null || !java.util.Objects.equals(locked.getContentId(), review.getContentRevision())) {
+            throw new BusinessException("正文版本已变化，请重新提交审核");
         }
 
         // 从上下文获取当前审核人信息
@@ -236,9 +238,14 @@ public class DocumentReviewServiceImpl extends ServiceImpl<DocumentReviewMapper,
             }
 
             // 触发RAG/KAG/ES索引（审核通过后才建索引）
-            triggerRagReindex(document.getId());
-            triggerKAGBuild(document.getId());
-            triggerSearchIndex(document, null);
+            org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                new org.springframework.transaction.support.TransactionSynchronization() {
+                    public void afterCommit() {
+                        triggerRagReindex(document.getId());
+                        triggerKAGBuild(document.getId());
+                        triggerSearchIndex(document, null);
+                    }
+                });
 
             // 发布审核通过事件 → RabbitMQ，通知文档作者
             try {
@@ -254,13 +261,12 @@ public class DocumentReviewServiceImpl extends ServiceImpl<DocumentReviewMapper,
                         .reviewLevel(review.getReviewLevel() != null ? review.getReviewLevel() : 1)
                         .timestamp(LocalDateTime.now())
                         .build();
-                CorrelationData correlationData = new CorrelationData(
-                        "review-APPROVED-" + document.getId() + "-" + UUID.randomUUID().toString().substring(0, 8));
-                rabbitTemplate.convertAndSend(REVIEW_EXCHANGE, reviewRoutingKey("approved"), event, correlationData);
-                log.info("已发布审核通过事件：documentId={}, eventType=APPROVED", document.getId());
+                reviewOutboxService.enqueue(reviewRoutingKey("approved"), event);
+                log.info("已保存审核通过事件：documentId={}, eventType=APPROVED", document.getId());
             } catch (Exception e) {
-                log.warn("发布审核通过事件失败（不影响审核流程）：documentId={}, error={}",
+                log.error("审核事件落库失败：documentId={}, error={}",
                         document.getId(), e.getMessage());
+                throw new BusinessException("审核事件保存失败");
             }
         }
 
@@ -288,6 +294,11 @@ public class DocumentReviewServiceImpl extends ServiceImpl<DocumentReviewMapper,
 
         if (review.getReviewResult() != null) {
             throw new BusinessException("该记录已审核");
+        }
+
+        Document locked = documentMapper.lockDocument(review.getDocumentId());
+        if (locked == null || review.getContentRevision() == null || !java.util.Objects.equals(locked.getContentId(), review.getContentRevision())) {
+            throw new BusinessException("正文版本已变化，请重新提交审核");
         }
 
         // 从上下文获取当前审核人信息
@@ -345,73 +356,22 @@ public class DocumentReviewServiceImpl extends ServiceImpl<DocumentReviewMapper,
                         .reviewComment(dto.getReviewComment())
                         .timestamp(LocalDateTime.now())
                         .build();
-                CorrelationData correlationData = new CorrelationData(
-                        "review-REJECTED-" + document.getId() + "-" + UUID.randomUUID().toString().substring(0, 8));
-                rabbitTemplate.convertAndSend(REVIEW_EXCHANGE, reviewRoutingKey("rejected"), event, correlationData);
-                log.info("已发布审核驳回事件：documentId={}, eventType=REJECTED", document.getId());
+                reviewOutboxService.enqueue(reviewRoutingKey("rejected"), event);
+                log.info("已保存审核驳回事件：documentId={}, eventType=REJECTED", document.getId());
             } catch (Exception e) {
-                log.warn("发布审核驳回事件失败（不影响审核流程）：documentId={}, error={}",
+                log.error("审核事件落库失败：documentId={}, error={}",
                         document.getId(), e.getMessage());
+                throw new BusinessException("审核事件保存失败");
             }
         }
 
         return true;
     }
 
-    /**
-     * 自动修复：为状态是 PENDING_REVIEW 但缺少待审核记录的文档补建审核记录
-     * <p>这种情况可能发生在直接操作数据库、数据迁移等场景</p>
-     */
-    private void syncOrphanedPendingDocuments() {
-        try {
-            List<Long> orphanedIds = jdbcTemplate.queryForList(
-                    "SELECT d.id FROM kb_document d " +
-                    "WHERE d.status = ? AND d.deleted = 0 " +
-                    "AND NOT EXISTS (SELECT 1 FROM tb_document_review r WHERE r.document_id = d.id AND r.review_result IS NULL)",
-                    Long.class,
-                    DocumentStatus.PENDING_REVIEW.getCode()
-            );
-
-            if (!orphanedIds.isEmpty()) {
-                log.info("发现 {} 个孤儿待审核文档，正在自动补建审核记录...", orphanedIds.size());
-                for (Long docId : orphanedIds) {
-                    try {
-                        Document document = documentMapper.selectById(docId);
-                        if (document == null) continue;
-
-                        Integer currentRound = jdbcTemplate.queryForObject(
-                                "SELECT COALESCE(MAX(review_round), 0) FROM tb_document_review WHERE document_id = ?",
-                                Integer.class, docId
-                        );
-
-                        DocumentReview review = new DocumentReview();
-                        review.setId(SnowflakeIdGenerator.getInstance().nextId());
-                        review.setDocumentId(docId);
-                        review.setReviewerId(null);
-                        review.setReviewerName(null);
-                        review.setReviewResult(null);
-                        review.setReviewComment(null);
-                        review.setBeforeStatus(document.getStatus());
-                        review.setReviewedAt(null);
-                        review.setReviewRound((currentRound != null ? currentRound : 0) + 1);
-                        review.setReviewLevel(1);
-                        review.setCreatedAt(LocalDateTime.now());
-                        documentReviewMapper.insert(review);
-                    } catch (Exception e) {
-                        log.warn("补建审核记录失败：documentId={}, error={}", docId, e.getMessage());
-                    }
-                }
-                log.info("孤儿待审核文档补建完成，共处理 {} 条", orphanedIds.size());
-            }
-        } catch (Exception e) {
-            log.warn("检查孤儿待审核文档失败（不影响查询流程）：{}", e.getMessage());
-        }
-    }
-
     @Override
     public PageResult<DocumentReviewVO> getPendingReviews(ReviewQueryDTO dto) {
         // 自动修复：为状态是 PENDING_REVIEW 但缺少待审核记录的文档补建审核记录
-        syncOrphanedPendingDocuments();
+        // 历史孤儿任务由迁移检查处理，查询接口不自动创建审核记录。
 
         // 构建查询条件
         LambdaQueryWrapper<DocumentReview> wrapper = new LambdaQueryWrapper<>();
@@ -471,7 +431,7 @@ public class DocumentReviewServiceImpl extends ServiceImpl<DocumentReviewMapper,
             throw new BusinessException("文档ID不能为空");
         }
 
-        syncOrphanedPendingDocuments();
+        // 历史孤儿任务由迁移检查处理，查询接口不自动创建审核记录。
         DocumentReview review = documentReviewMapper.selectLatestByDocumentId(documentId);
         if (review == null) {
             throw new BusinessException("未找到审核记录");
@@ -636,6 +596,7 @@ public class DocumentReviewServiceImpl extends ServiceImpl<DocumentReviewMapper,
             } catch (Exception e) {
                 log.warn("同步ES搜索索引失败（搜索服务不可用，不影响文档操作）：documentId={}, error={}",
                         document.getId(), e.getMessage());
+                throw new BusinessException("审核事件保存失败");
             }
         }, asyncTaskExecutor);
     }

@@ -18,6 +18,9 @@ import java.util.List;
 @Mapper
 public interface DocumentMapper extends BaseMapper<Document> {
 
+    @org.apache.ibatis.annotations.Select("SELECT * FROM kb_document WHERE id=#{id} AND deleted=0 FOR UPDATE")
+    Document lockDocument(@Param("id") Long id);
+
     int incrementViewCount(@Param("documentId") Long documentId);
 
     int incrementLikeCount(@Param("documentId") Long documentId);

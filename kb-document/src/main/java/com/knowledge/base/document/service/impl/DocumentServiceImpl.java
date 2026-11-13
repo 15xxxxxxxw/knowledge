@@ -159,6 +159,9 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         // 复制属性时排除content字段，content存储在MongoDB中
         BeanUtil.copyProperties(documentDTO, document, "content");
 
+        boolean submitOnCreate = Integer.valueOf(3).equals(document.getStatus());
+        if (submitOnCreate) document.setStatus(0);
+
         // 生成ID
         document.setId(SnowflakeIdGenerator.getInstance().nextId());
 
@@ -257,6 +260,8 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
             }
         }
 
+        if (submitOnCreate) documentReviewService.submitForReview(document.getId());
+
         // 异步触发RAG索引（仅已发布且有内容的文档）
         if (Objects.equals(document.getStatus(), 1) && hasContent) {
             triggerRagReindex(document.getId());
@@ -289,10 +294,12 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         if (autoSaveDTO.getId() != null) {
             // -- 更新已有文档 --
             log.info("自动保存-更新：documentId={}", autoSaveDTO.getId());
-            Document existDocument = documentMapper.selectById(autoSaveDTO.getId());
+            Document existDocument = documentMapper.lockDocument(autoSaveDTO.getId());
             if (existDocument == null) {
                 throw new BusinessException(ResultCode.DOCUMENT_NOT_EXIST);
             }
+
+            if (Objects.equals(existDocument.getStatus(), 3)) throw new BusinessException("待审核期间禁止自动保存");
 
             // 更新MongoDB内容（如果提供了content）
             if (StrUtil.isNotBlank(currentContent)) {
@@ -315,6 +322,7 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
                 } catch (Exception e) {
                     log.warn("自动保存-更新MongoDB内容失败：documentId={}, error={}",
                             autoSaveDTO.getId(), e.getMessage());
+                    throw new BusinessException("自动保存正文失败");
                 }
             }
 
@@ -359,6 +367,8 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
             );
 
             if (recentDraft != null) {
+                recentDraft = documentMapper.lockDocument(recentDraft.getId());
+                if (recentDraft == null || !Integer.valueOf(0).equals(recentDraft.getStatus())) throw new BusinessException("草稿状态已变化，请刷新");
                 // 复用已有草稿而不是创建新的
                 log.info("自动保存-去重复用草稿：documentId={}", recentDraft.getId());
                 Document updateDoc = new Document();
@@ -401,6 +411,7 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
                     } catch (Exception e) {
                         log.warn("自动保存-去重后更新MongoDB失败：documentId={}, error={}",
                                 recentDraft.getId(), e.getMessage());
+                        throw new BusinessException("自动保存正文失败");
                     }
                 }
 
@@ -484,9 +495,13 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         }
 
         // 检查文档是否存在
-        Document existDocument = documentMapper.selectById(documentDTO.getId());
+        Document existDocument = documentMapper.lockDocument(documentDTO.getId());
         if (existDocument == null) {
             throw new BusinessException(ResultCode.DOCUMENT_NOT_EXIST);
+        }
+
+        if (Objects.equals(existDocument.getStatus(), 3)) {
+            throw new BusinessException("待审核期间禁止编辑，请先完成审核");
         }
 
         if (documentDTO.getTeamId() != null) {
@@ -499,9 +514,7 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
             try {
                 if (StrUtil.isNotBlank(existDocument.getContentId())) {
                     // 更新现有内容
-                    if (!Boolean.TRUE.equals(documentContentService.updateContent(documentDTO.getId(), documentDTO.getContent()))) {
-                        throw new BusinessException("正文保存失败");
-                    }
+                    contentId = documentContentService.saveContent(documentDTO.getId(), documentDTO.getContent());
                 } else {
                     // 创建新内容
                     contentId = documentContentService.saveContent(documentDTO.getId(), documentDTO.getContent());
@@ -537,7 +550,9 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
         boolean toPendingReview = !Objects.equals(existDocument.getStatus(), newStatus)
                 && Objects.equals(newStatus, 3);
 
+        if (toPendingReview) document.setStatus(existDocument.getStatus());
         int count = documentMapper.updateById(document);
+        if (count != 1) throw new BusinessException("文档元数据保存失败");
 
         // 如果分类发生了变更，更新对应分类的文档数量
         Long oldCategoryId = existDocument.getCategoryId();
@@ -558,6 +573,7 @@ public class DocumentServiceImpl extends ServiceImpl<DocumentMapper, Document> i
                 log.info("文档编辑后自动提交审核：documentId={}", documentDTO.getId());
             } catch (Exception e) {
                 log.error("提交审核失败：documentId={}, error={}", documentDTO.getId(), e.getMessage(), e);
+                throw new BusinessException("提交审核失败，保存已回滚");
             }
         }
 

@@ -37,6 +37,9 @@ public class ReviewNotificationListener {
     private NotificationService notificationService;
 
     @Resource
+    private org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
+
+    @Resource
     private SimpMessagingTemplate messagingTemplate;
 
     @Resource
@@ -46,11 +49,15 @@ public class ReviewNotificationListener {
     private SystemConfigCache systemConfigCache;
 
     @RabbitListener(queues = "#{@reviewNotificationQueue.name}")
+    @org.springframework.transaction.annotation.Transactional(rollbackFor=Exception.class)
     public void handleReviewEvent(ReviewEventDTO event) {
         if (event == null || event.getEventType() == null) {
             log.warn("收到空的审核事件，忽略");
             return;
         }
+
+        if (event.getEventId() == null) throw new IllegalArgumentException("审核事件缺少 eventId");
+        if (jdbcTemplate.update("INSERT IGNORE INTO kb_review_inbox(event_id) VALUES(?)", event.getEventId()) == 0) return;
 
         String notificationType = "review";
         String link = "/review/documents/" + event.getDocumentId();
@@ -63,9 +70,10 @@ public class ReviewNotificationListener {
                 default -> log.warn("未知的审核事件类型：{}", event.getEventType());
             }
         } catch (Exception e) {
-            // 捕获所有异常，避免死循环重试
+            // 异常继续向外抛，回滚 Inbox 与通知并交还消息；不能确认一个未落库的事件。
             log.error("处理审核事件失败：eventType={}, documentId={}, error={}",
                     event.getEventType(), event.getDocumentId(), e.getMessage(), e);
+            throw new IllegalStateException("审核通知处理失败，等待重试", e);
         }
     }
 
@@ -82,7 +90,7 @@ public class ReviewNotificationListener {
             reviewerIds = findReviewerUserIds();
         } catch (Exception e) {
             log.error("查询审核员失败：documentId={}, error={}", event.getDocumentId(), e.getMessage());
-            reviewerIds = List.of();
+            throw new IllegalStateException("审核员查询失败", e);
         }
 
         if (reviewerIds.isEmpty()) {
@@ -161,7 +169,7 @@ public class ReviewNotificationListener {
         } catch (Exception e) {
             log.error("通知持久化失败：userId={}, type={}, documentId={}, error={}",
                     userId, type, documentId, e.getMessage(), e);
-            // 持久化失败不影响 WebSocket 推送（仍可尝试实时通知）
+            throw new IllegalStateException("通知落库失败", e);
         }
 
         // 2. WebSocket 点对点推送给目标用户（仅当WebSocket启用时）
@@ -175,8 +183,13 @@ public class ReviewNotificationListener {
         payload.put("content", content);
         payload.put("link", link);
         payload.put("documentId", documentId);
-        messagingTemplate.convertAndSendToUser(
-                String.valueOf(userId), "/queue/notifications", payload);
+        org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+            new org.springframework.transaction.support.TransactionSynchronization() {
+                public void afterCommit() {
+                    try { messagingTemplate.convertAndSendToUser(String.valueOf(userId), "/queue/notifications", payload); }
+                    catch (Exception ex) { log.warn("实时推送失败，请从通知列表读取：userId={}", userId); }
+                }
+            });
     }
 
     /**
@@ -192,10 +205,17 @@ public class ReviewNotificationListener {
      *
      * <p>按优先级依次查询：ROLE_REVIEWER → ROLE_ADMIN → ROLE_SUPER_ADMIN</p>
      */
+    private void requireSuccessful(Result<?> result) {
+        if (result == null || !com.knowledge.base.common.result.ResultCode.SUCCESS.getCode().equals(result.getCode())) {
+            throw new IllegalStateException("查询审核人接口失败");
+        }
+    }
+
     private List<Long> findReviewerUserIds() {
         try {
             // 1. 优先查询审核员
             Result<List<Long>> result = userAuthFeignClient.getUserIdsByRole("ROLE_REVIEWER");
+            requireSuccessful(result);
             if (result != null && result.getData() != null && !result.getData().isEmpty()) {
                 List<Long> ids = result.getData();
                 log.info("查询到审核员 {} 人：ids={}", ids.size(), ids);
@@ -204,16 +224,18 @@ public class ReviewNotificationListener {
 
             // 2. 降级：查询 ROLE_ADMIN 角色
             log.warn("未找到审核员，降级使用管理员角色");
-            Result<List<Long>> CHANGE_ME_LOCAL_SECRET_012345678901234567890123456789Result = userAuthFeignClient.getUserIdsByRole("ROLE_ADMIN");
-            if (CHANGE_ME_LOCAL_SECRET_012345678901234567890123456789Result != null && CHANGE_ME_LOCAL_SECRET_012345678901234567890123456789Result.getData() != null && !CHANGE_ME_LOCAL_SECRET_012345678901234567890123456789Result.getData().isEmpty()) {
-                List<Long> CHANGE_ME_LOCAL_SECRET_012345678901234567890123456789Ids = CHANGE_ME_LOCAL_SECRET_012345678901234567890123456789Result.getData();
-                log.info("使用管理员 {} 人作为审核通知接收人：ids={}", CHANGE_ME_LOCAL_SECRET_012345678901234567890123456789Ids.size(), CHANGE_ME_LOCAL_SECRET_012345678901234567890123456789Ids);
-                return CHANGE_ME_LOCAL_SECRET_012345678901234567890123456789Ids;
+            Result<List<Long>> adminResult = userAuthFeignClient.getUserIdsByRole("ROLE_ADMIN");
+            requireSuccessful(adminResult);
+            if (adminResult != null && adminResult.getData() != null && !adminResult.getData().isEmpty()) {
+                List<Long> adminIds = adminResult.getData();
+                log.info("使用管理员 {} 人作为审核通知接收人：ids={}", adminIds.size(), adminIds);
+                return adminIds;
             }
 
-            // 3. 最终降级：查询 ROLE_SUPER_ADMIN（CHANGE_ME_LOCAL_SECRET_012345678901234567890123456789 账号默认角色）
+            // 3. 最终降级：查询 ROLE_SUPER_ADMIN（admin 账号默认角色）
             log.warn("未找到审核员和管理员，降级使用超级管理员角色");
             Result<List<Long>> superAdminResult = userAuthFeignClient.getUserIdsByRole("ROLE_SUPER_ADMIN");
+            requireSuccessful(superAdminResult);
             if (superAdminResult != null && superAdminResult.getData() != null && !superAdminResult.getData().isEmpty()) {
                 List<Long> superAdminIds = superAdminResult.getData();
                 log.info("使用超级管理员 {} 人作为审核通知接收人：ids={}", superAdminIds.size(), superAdminIds);
@@ -224,7 +246,7 @@ public class ReviewNotificationListener {
             return List.of();
         } catch (Exception e) {
             log.error("Feign查询审核员失败：{}", e.getMessage());
-            return List.of();
+            throw new IllegalStateException("审核员查询失败", e);
         }
     }
 

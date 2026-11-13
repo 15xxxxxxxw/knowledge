@@ -92,6 +92,9 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
+    @Resource
+    private com.knowledge.base.userauth.service.RefreshSessionService refreshSessionService;
+
     @Override
     public LoginVO login(String username, String password) {
         log.info("用户登录：username={}", username);
@@ -130,6 +133,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         // 生成JWT Token（使用安全配置的会话超时时间）
         String accessToken = jwtTokenUtil.generateAccessToken(user.getId(), user.getUsername(), user.getAvatar(), sessionTimeout);
         String refreshToken = jwtTokenUtil.generateRefreshToken(user.getId());
+        refreshSessionService.register(accessToken, refreshToken);
         List<String> roles = getUserRoleCodes(user.getId());
         List<String> permissions = getUserPermissions(user.getId());
 
@@ -221,6 +225,9 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         if (expireTime == null) {
             expireTime = new Date(System.currentTimeMillis() + 24 * 3600 * 1000L);
         }
+
+        Claims logoutClaims = jwtTokenUtil.parseAnyToken(rawToken);
+        if (logoutClaims != null) refreshSessionService.revoke(rawToken);
 
         // SHA-256哈希Token用于存储
         String tokenHash = DigestUtil.sha256Hex(rawToken);
@@ -883,6 +890,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         // 生成新的访问令牌和刷新令牌（Token 轮换）
         String newAccessToken = jwtTokenUtil.generateAccessToken(user.getId(), user.getUsername(), user.getAvatar(), sessionTimeout);
         String newRefreshToken = jwtTokenUtil.generateRefreshToken(user.getId());
+        refreshSessionService.rotate(refreshToken, newAccessToken, newRefreshToken);
 
         // 获取用户角色和权限
         List<String> roles = getUserRoleCodes(user.getId());

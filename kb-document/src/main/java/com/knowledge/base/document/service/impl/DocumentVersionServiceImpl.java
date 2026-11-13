@@ -120,7 +120,7 @@ public class DocumentVersionServiceImpl implements DocumentVersionService {
         }
 
         // 检查文档是否存在
-        Document document = documentMapper.selectById(documentId);
+        Document document = documentMapper.lockDocument(documentId);
         if (document == null) {
             throw new BusinessException("文档不存在");
         }
@@ -162,10 +162,12 @@ public class DocumentVersionServiceImpl implements DocumentVersionService {
         }
 
         // 检查文档是否存在
-        Document document = documentMapper.selectById(documentId);
+        Document document = documentMapper.lockDocument(documentId);
         if (document == null) {
             throw new BusinessException("文档不存在");
         }
+
+        if (Integer.valueOf(3).equals(document.getStatus())) throw new BusinessException("待审核期间禁止恢复版本");
 
         // 检查版本是否存在
         DocumentVersion version = documentVersionMapper.selectById(restoreDTO.getVersionId());

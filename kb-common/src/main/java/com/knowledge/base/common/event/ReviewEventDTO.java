@@ -36,6 +36,9 @@ public class ReviewEventDTO implements Serializable {
     /** 事件类型：SUBMITTED / APPROVED / REJECTED */
     private String eventType;
 
+    /** 持久事件 ID，重试时保持不变。 */
+    private String eventId;
+
     /** 文档ID */
     private Long documentId;
 

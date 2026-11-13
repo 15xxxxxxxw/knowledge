@@ -28,6 +28,9 @@ public class DocumentContentServiceImpl implements DocumentContentService {
     private DocumentContentRepository documentContentRepository;
 
     @Resource
+    private com.knowledge.base.document.mapper.DocumentMapper documentMapper;
+
+    @Resource
     private MarkdownProcessService markdownProcessService;
 
     @Override
@@ -42,6 +45,9 @@ public class DocumentContentServiceImpl implements DocumentContentService {
         if (content == null || content.trim().isEmpty()) {
             throw new BusinessException("文档内容不能为空");
         }
+
+        var locked = documentMapper.lockDocument(documentId);
+        if (locked != null && Integer.valueOf(3).equals(locked.getStatus())) throw new BusinessException("待审核期间禁止修改正文");
 
         // 处理内容（上传外部图片等）
         String processedContent = processContent(content);
@@ -61,6 +67,17 @@ public class DocumentContentServiceImpl implements DocumentContentService {
         // 保存到MongoDB
         DocumentContent saved = documentContentRepository.save(documentContent);
 
+        if (org.springframework.transaction.support.TransactionSynchronizationManager.isSynchronizationActive()) {
+            org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                new org.springframework.transaction.support.TransactionSynchronization() {
+                    public void afterCompletion(int status) {
+                        if (status == STATUS_ROLLED_BACK) {
+                            try { documentContentRepository.deleteById(saved.getId()); }
+                            catch (Exception ex) { log.warn("回滚后正文清理失败：contentId={}", saved.getId(), ex); }
+                        }
+                    }
+                });
+        }
         log.info("文档内容保存成功：documentId={}, contentId={}", documentId, saved.getId());
 
         return saved.getId();
@@ -79,28 +96,15 @@ public class DocumentContentServiceImpl implements DocumentContentService {
             throw new BusinessException("文档内容不能为空");
         }
 
-        // 查找现有内容
-        DocumentContent existContent = documentContentRepository.findByDocumentId(documentId);
-        if (existContent == null) {
-            // 如果不存在，则创建新内容
-            saveContent(documentId, content);
-            return true;
-        }
-
-        // 处理内容（上传外部图片等）
-        String processedContent = processContent(content);
-
-        // 更新内容
-        existContent.setContent(processedContent);
-        existContent.setContentLength(processedContent.length());
-        existContent.setContentSummary(generateContentSummary(processedContent));
-        existContent.setUpdatedAt(LocalDateTime.now());
-        existContent.setVersion(existContent.getVersion() + 1);
-
-        documentContentRepository.save(existContent);
-
-        log.info("文档内容更新成功：documentId={}, contentId={}", documentId, existContent.getId());
-
+        // 不覆盖旧正文；MySQL 事务失败时旧指针仍有效，新正文只成为未引用记录。
+        var document = documentMapper.lockDocument(documentId);
+        if (document == null) throw new BusinessException("文档不存在");
+        if (Integer.valueOf(3).equals(document.getStatus())) throw new BusinessException("待审核期间禁止修改正文");
+        String id = saveContent(documentId, content);
+        var update = new com.knowledge.base.document.entity.Document();
+        update.setId(documentId);
+        update.setContentId(id);
+        if (documentMapper.updateById(update) != 1) throw new BusinessException("正文指针切换失败");
         return true;
     }
 
@@ -110,7 +114,9 @@ public class DocumentContentServiceImpl implements DocumentContentService {
             throw new BusinessException("文档ID不能为空");
         }
 
-        DocumentContent content = documentContentRepository.findByDocumentId(documentId);
+        var document = documentMapper.selectById(documentId);
+        DocumentContent content = document == null || document.getContentId() == null ? null
+                : documentContentRepository.findById(document.getContentId()).orElse(null);
         if (content == null) {
             throw new BusinessException("文档内容不存在");
         }
@@ -138,7 +144,9 @@ public class DocumentContentServiceImpl implements DocumentContentService {
         }
 
         // 软删除
-        DocumentContent content = documentContentRepository.findByDocumentId(documentId);
+        var document = documentMapper.selectById(documentId);
+        DocumentContent content = document == null || document.getContentId() == null ? null
+                : documentContentRepository.findById(document.getContentId()).orElse(null);
         if (content != null) {
             content.setDeleted(true);
             content.setUpdatedAt(LocalDateTime.now());

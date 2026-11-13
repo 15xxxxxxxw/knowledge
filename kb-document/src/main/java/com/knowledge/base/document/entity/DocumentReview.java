@@ -32,6 +32,9 @@ public class DocumentReview {
     @Schema(description = "文档ID")
     private Long documentId;
 
+    /** 提交时绑定的不可变正文记录 ID。 */
+    private String contentRevision;
+
     /**
      * 审核人ID
      */

@@ -96,6 +96,10 @@ public class RabbitMQConfig {
     @Bean
     public RabbitTemplate rabbitTemplate(ConnectionFactory connectionFactory,
                                           Jackson2JsonMessageConverter messageConverter) {
+        if (connectionFactory instanceof org.springframework.amqp.rabbit.connection.CachingConnectionFactory caching) {
+            caching.setPublisherConfirmType(org.springframework.amqp.rabbit.connection.CachingConnectionFactory.ConfirmType.CORRELATED);
+            caching.setPublisherReturns(true);
+        }
         RabbitTemplate rabbitTemplate = new RabbitTemplate(connectionFactory);
         rabbitTemplate.setMessageConverter(messageConverter);
 
