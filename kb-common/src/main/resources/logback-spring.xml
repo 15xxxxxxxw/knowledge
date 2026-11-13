@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  企业知识库统一日志配置
+  ============================================================================
+  放置位置：kb-common 的 resources 根目录。
+  由于所有业务服务都依赖 kb-common，该文件位于各服务 classpath 根，
+  Spring Boot 会自动加载（无需在每个模块重复配置）。
+
+  若某个服务需要独立配置，只需在它自己的 src/main/resources 下再放一份
+  同名 logback-spring.xml，本模块的配置就会被覆盖。
+
+  可覆盖的环境变量 / 启动参数：
+    - logging.file.path   日志根目录，默认 logs（最终路径：${logging.file.path}/${spring.application.name}/）
+    - logging.level.root  全局日志级别，默认 INFO（Spring Boot 会在加载本文件后应用它）
+    - LOG_LEVEL           兜底级别，默认 INFO
+
+  输出目标：
+    1) 控制台（带颜色，方便本地开发）
+    2) 全量滚动文件  ${LOG_PATH}/${APP_NAME}/${APP_NAME}.log
+    3) 错误滚动文件  ${LOG_PATH}/${APP_NAME}/${APP_NAME}-error.log（仅 ERROR）
+    4) 生产环境：通过 SkyWalking gRPC Appender 上报日志到 OAP（可在 SkyWalking UI 的日志页检索）
+    文件 Appender 统一走 AsyncAppender，避免磁盘 I/O 阻塞业务线程。
+
+  链路追踪：每行日志格式含 [%X{tid}]，即 SkyWalking traceId。
+  由 TraceIdFilter（Servlet 服务）+ TraceIdGlobalFilter（网关）写入 MDC，
+  优先取 SkyWalking Agent 的 traceId，Agent 未挂载时回退为上游透传值 / 本地 UUID，
+  因此日志中的 tid 可以直接拿去 SkyWalking UI 检索同一条链路。
+  ============================================================================
+-->
+<configuration scan="false">
+
+    <!-- ==================== 从 Spring 环境读取变量 ==================== -->
+    <springProperty scope="context" name="APP_NAME" source="spring.application.name" defaultValue="knowledge-base"/>
+    <springProperty scope="context" name="LOG_PATH" source="logging.file.path" defaultValue="logs"/>
+
+    <!-- 控制台格式：彩色 -->
+    <property name="LOG_PATTERN_CONSOLE"
+              value="%d{yyyy-MM-dd HH:mm:ss.SSS} %highlight(%-5level) [%thread] [TID:%X{tid:-}] %cyan(%logger{40}) - %msg%n"/>
+    <!-- 文件格式：纯文本，方便 grep / ELK 采集 -->
+    <property name="LOG_PATTERN_FILE"
+              value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [TID:%X{tid:-}] %logger{50} - %msg%n"/>
+
+    <!-- ==================== 控制台 ==================== -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>${LOG_PATTERN_CONSOLE}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- ==================== 全量滚动文件 ==================== -->
+    <appender name="FILE_ALL" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/${APP_NAME}/${APP_NAME}.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <!-- 按天 + 按大小滚动，历史文件 gzip 压缩 -->
+            <fileNamePattern>${LOG_PATH}/${APP_NAME}/${APP_NAME}.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>100MB</maxFileSize>
+            <maxHistory>30</maxHistory>
+            <totalSizeCap>5GB</totalSizeCap>
+            <cleanHistoryOnStart>true</cleanHistoryOnStart>
+        </rollingPolicy>
+        <encoder>
+            <pattern>${LOG_PATTERN_FILE}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- ==================== 错误日志文件 ==================== -->
+    <appender name="FILE_ERROR" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/${APP_NAME}/${APP_NAME}-error.log</file>
+        <!-- 只写 ERROR 及以上 -->
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>ERROR</level>
+        </filter>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_PATH}/${APP_NAME}/${APP_NAME}-error.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>100MB</maxFileSize>
+            <maxHistory>60</maxHistory>
+            <totalSizeCap>2GB</totalSizeCap>
+            <cleanHistoryOnStart>true</cleanHistoryOnStart>
+        </rollingPolicy>
+        <encoder>
+            <pattern>${LOG_PATTERN_FILE}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- ==================== 异步包装 ==================== -->
+    <!-- queueSize=4096，discardingThreshold=0（不丢低级别日志），neverBlock=true（队列满时丢弃而非阻塞业务线程） -->
+    <appender name="ASYNC_FILE_ALL" class="ch.qos.logback.classic.AsyncAppender">
+        <appender-ref ref="FILE_ALL"/>
+        <queueSize>4096</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>true</neverBlock>
+        <includeCallerData>false</includeCallerData>
+    </appender>
+
+    <appender name="ASYNC_FILE_ERROR" class="ch.qos.logback.classic.AsyncAppender">
+        <appender-ref ref="FILE_ERROR"/>
+        <queueSize>1024</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>true</neverBlock>
+        <includeCallerData>false</includeCallerData>
+    </appender>
+
+    <!-- ==================== 默认（开发 / 测试）：控制台 + 文件 ==================== -->
+    <springProfile name="!prod">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="ASYNC_FILE_ALL"/>
+            <appender-ref ref="ASYNC_FILE_ERROR"/>
+        </root>
+    </springProfile>
+
+    <!-- ==================== 生产：文件为主，控制台保留给容器采集 ==================== -->
+    <!--
+      SkyWalking 日志上报：通过 gRPC 把日志发到 OAP，可在 SkyWalking UI 的"日志"页按 tid 检索。
+      仅在 prod profile 启用（需要挂载 Java Agent，且 OAP 可达），避免本地无 OAP 时报连接错误。
+    -->
+    <springProfile name="prod">
+        <appender name="GRPC_LOG" class="org.apache.skywalking.apm.toolkit.log.logback.v1.x.log.GRPCLogClientAppender">
+            <encoder class="ch.qos.logback.core.encoder.LayoutWrappingEncoder">
+                <layout class="org.apache.skywalking.apm.toolkit.log.logback.v1.x.mdc.TraceIdMDCPatternLogbackLayout">
+                    <pattern>${LOG_PATTERN_FILE}</pattern>
+                </layout>
+            </encoder>
+        </appender>
+
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="ASYNC_FILE_ALL"/>
+            <appender-ref ref="ASYNC_FILE_ERROR"/>
+            <appender-ref ref="GRPC_LOG"/>
+        </root>
+    </springProfile>
+
+</configuration>
