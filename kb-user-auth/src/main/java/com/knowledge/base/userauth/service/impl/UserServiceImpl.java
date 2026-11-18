@@ -922,7 +922,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     @Override
     @Transactional(rollbackFor = Exception.class)
     public String verifyEmail(String token) {
-        log.info("邮箱验证：token={}", token);
+        log.info("邮箱验证");
 
         if (!StringUtils.hasText(token)) {
             throw new BusinessException("激活令牌不能为空");

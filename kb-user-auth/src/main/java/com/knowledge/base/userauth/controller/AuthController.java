@@ -108,7 +108,7 @@ public class AuthController {
     @GetMapping("/verify-email")
     @Operation(summary = "邮箱验证", description = "通过邮件中的激活链接验证邮箱并激活账户")
     public Result<String> verifyEmail(@RequestParam String token) {
-        log.info("邮箱验证请求：token={}", token);
+        log.info("邮箱验证请求");
         String message = userService.verifyEmail(token);
         return Result.success(message);
     }

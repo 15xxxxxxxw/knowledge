@@ -17,6 +17,10 @@ import java.util.List;
 @Mapper
 public interface DocumentShareMapper extends BaseMapper<DocumentShare> {
 
+    // 访问时用当前读锁定分享记录，校验和扣减次数在同一个事务内完成。
+    @Select("SELECT * FROM kb_document_share WHERE share_id = #{shareId} AND deleted = 0 FOR UPDATE")
+    DocumentShare lockForAccess(@Param("shareId") String shareId);
+
     /**
      * 根据分享ID查询
      *

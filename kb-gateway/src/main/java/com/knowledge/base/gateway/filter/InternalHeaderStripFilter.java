@@ -31,13 +31,16 @@ public class InternalHeaderStripFilter implements GlobalFilter, Ordered {
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
         ServerHttpRequest request = exchange.getRequest();
-        if (request.getHeaders().containsKey(INNER_REQUEST_HEADER)) {
+        if (request.getHeaders().containsKey(INNER_REQUEST_HEADER) || request.getHeaders().containsKey("X-User-Id")) {
             log.warn("拦截到外部请求伪造的内部调用标记，已剥离：uri={}, remoteIp={}",
                     request.getURI().getPath(),
                     request.getRemoteAddress() != null
                             ? request.getRemoteAddress().getAddress().getHostAddress() : "unknown");
             ServerHttpRequest mutated = request.mutate()
-                    .headers(headers -> headers.remove(INNER_REQUEST_HEADER))
+                    .headers(headers -> {
+                        headers.remove(INNER_REQUEST_HEADER);
+                        headers.remove("X-User-Id");
+                    })
                     .build();
             return chain.filter(exchange.mutate().request(mutated).build());
         }

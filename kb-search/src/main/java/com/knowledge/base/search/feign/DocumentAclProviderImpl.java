@@ -28,24 +28,13 @@ public class DocumentAclProviderImpl implements DocumentAclProvider {
         if (response == null) {
             throw new IllegalStateException("kb-document 权限接口返回为空");
         }
-        Object data = response.get("data");
-        if (!(data instanceof List<?> rawList)) {
-            throw new IllegalStateException("kb-document 权限接口返回结构异常: " + response);
+        if (!String.valueOf(com.knowledge.base.common.result.ResultCode.SUCCESS.getCode()).equals(String.valueOf(response.get("code")))
+                || !(response.get("data") instanceof List<?> rawList)) {
+            throw new IllegalStateException("文档权限接口响应异常");
         }
         List<Long> ids = new ArrayList<>(rawList.size());
         for (Object item : rawList) {
-            if (item == null) {
-                continue;
-            }
-            if (item instanceof Number number) {
-                ids.add(number.longValue());
-            } else {
-                try {
-                    ids.add(Long.parseLong(String.valueOf(item)));
-                } catch (NumberFormatException e) {
-                    log.warn("文档权限接口返回了非数字ID，已忽略：{}", item);
-                }
-            }
+            ids.add(Long.parseLong(String.valueOf(item)));
         }
         return ids;
     }

@@ -88,11 +88,8 @@ public class UnifiedResponseFilter implements GlobalFilter, Ordered {
                             // 因此这里直接从请求头读取，保证日志能带上 traceId。
                             String traceId = exchange.getRequest().getHeaders()
                                     .getFirst(TraceIdConstants.HEADER);
-                            log.info("[{}] 网关转发响应: URI={}, Status={}, Response={}",
-                                    traceId,
-                                    exchange.getRequest().getURI(),
-                                    getStatusCode(),
-                                    responseData);
+                            log.debug("[{}] 网关响应 path={}, status={}", traceId,
+                                    exchange.getRequest().getURI().getPath(), getStatusCode());
 
                             // 统一处理响应数据：
                             // 1. swagger-config：改写分组地址为相对路径（经网关访问必需）；

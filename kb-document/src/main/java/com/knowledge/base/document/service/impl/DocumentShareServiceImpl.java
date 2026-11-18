@@ -148,7 +148,7 @@ public class DocumentShareServiceImpl extends ServiceImpl<DocumentShareMapper, D
     public Long accessShare(String shareId, String password) {
         log.info("访问分享链接：shareId={}", shareId);
 
-        DocumentShare share = baseMapper.selectByShareId(shareId);
+        DocumentShare share = baseMapper.lockForAccess(shareId);
         if (share == null || share.getStatus() != 0 || share.getDeleted() == 1) {
             throw new BusinessException("分享不存在或已失效");
         }
@@ -158,7 +158,7 @@ public class DocumentShareServiceImpl extends ServiceImpl<DocumentShareMapper, D
             throw new BusinessException("分享已过期");
         }
 
-        if (share.getAccessLimit() > 0 && share.getAccessCount() >= share.getAccessLimit()) {
+        if (share.getAccessLimit() > 0 && share.getAccessCount() != null && share.getAccessCount() >= share.getAccessLimit()) {
             throw new BusinessException("访问次数已达上限");
         }
 
@@ -172,7 +172,7 @@ public class DocumentShareServiceImpl extends ServiceImpl<DocumentShareMapper, D
         }
 
         share.setAccessCount(share.getAccessCount() == null ? 1 : share.getAccessCount() + 1);
-        baseMapper.updateById(share);
+        if (baseMapper.updateById(share) != 1) throw new BusinessException("记录分享访问失败");
 
         log.info("分享访问成功：shareId={}, documentId={}", shareId, share.getDocumentId());
         return share.getDocumentId();
@@ -253,7 +253,7 @@ public class DocumentShareServiceImpl extends ServiceImpl<DocumentShareMapper, D
     public boolean updateShare(String shareId, ShareDTO shareDTO) {
         log.info("更新分享设置：shareId={}", shareId);
 
-        DocumentShare share = baseMapper.selectByShareId(shareId);
+        DocumentShare share = baseMapper.lockForAccess(shareId);
         if (share == null) {
             throw new BusinessException("分享不存在");
         }

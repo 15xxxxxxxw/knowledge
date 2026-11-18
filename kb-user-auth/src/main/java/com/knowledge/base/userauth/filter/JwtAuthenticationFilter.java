@@ -38,7 +38,7 @@ import java.util.List;
  *   <li>从请求头中解析JWT Token，验证用户身份</li>
  *   <li>将用户信息设置到Spring Security上下文中</li>
  *   <li>将用户信息设置到ThreadLocal上下文中，供后续业务使用</li>
- *   <li>支持真实JWT Token和Mock Token（开发测试用）</li>
+ *   <li>校验签名、签发方、到期时间和访问令牌用途</li>
  *   <li>请求结束后清理上下文，防止内存泄漏</li>
  * </ul>
  *
@@ -101,7 +101,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
         // 从请求中提取token
         String token = extractTokenFromRequest(request);
-        log.info("提取的Token: {}", token != null ? token.substring(0, Math.min(30, token.length())) + "..." : "null");
+        log.debug("请求是否携带凭证：{}", token != null);
 
         if (token != null) {
             try {
@@ -268,33 +268,11 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         return authorities;
     }
 
-    /**
-     * 解析Token获取用户信息
-     *
-     * <p>支持两种Token格式：</p>
-     * <ol>
-     *   <li>真实JWT Token：使用JwtTokenUtil解析</li>
-     *   <li>Mock Token：开发测试使用，格式为 mock-access-token-{userId}</li>
-     * </ol>
-     *
-     * @param token JWT Token
-     * @return 用户信息，解析失败返回null
-     */
+    /** 仅从已验签且用途正确的访问令牌建立身份。 */
     private UserInfo parseToken(String token) {
-        // 优先尝试解析真实的JWT Token
-        if (jwtTokenUtil.validateToken(token)) {
-            Long userId = jwtTokenUtil.getUserIdFromToken(token);
-            if (userId != null) {
-                return loadUserInfo(userId);
-            }
-        }
-
-        // 开发环境：支持Mock Token
-        if (token.startsWith("mock-access-token-")) {
-            return parseMockToken(token);
-        }
-
-        return null;
+        var claims = jwtTokenUtil.parseToken(token);
+        if (claims == null || claims.getExpiration() == null) return null;
+        return loadUserInfo(Long.valueOf(claims.getSubject()));
     }
 
     /**
@@ -317,23 +295,6 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             }
         } catch (Exception e) {
             log.error("查询用户信息失败: userId={}", userId, e);
-        }
-        return null;
-    }
-
-    /**
-     * 解析Mock Token（开发测试用）
-     *
-     * @param token Mock Token
-     * @return 用户信息
-     */
-    private UserInfo parseMockToken(String token) {
-        try {
-            String userIdStr = token.substring("mock-access-token-".length());
-            Long userId = Long.parseLong(userIdStr);
-            return loadUserInfo(userId);
-        } catch (NumberFormatException e) {
-            log.error("解析Mock Token失败: {}", e.getMessage());
         }
         return null;
     }

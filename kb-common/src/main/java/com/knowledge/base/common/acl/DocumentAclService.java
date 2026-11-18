@@ -42,7 +42,7 @@ import java.util.stream.Collectors;
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
 public class DocumentAclService {
 
-    private static final String CACHE_KEY_PREFIX = "acl:doc:inaccessible:";
+    private static final String CACHE_KEY_PREFIX = "acl:doc:v2:inaccessible:";
 
     /** 空集合的哨兵值：区分"缓存了空集合"与"没有缓存" */
     private static final String EMPTY_SENTINEL = "__EMPTY__";
@@ -74,22 +74,24 @@ public class DocumentAclService {
 
         DocumentAclProvider provider = providerHolder.getIfAvailable();
         if (provider == null) {
-            // 该服务没有接权限源（例如内部任务服务），按"无限制"处理
-            return DocumentAclResult.of(Collections.emptySet());
+            return DocumentAclResult.unresolved();
         }
 
         String cacheKey = CACHE_KEY_PREFIX + (userId == null ? "anonymous" : userId);
 
         String cached = safeGet(cacheKey);
         if (cached != null) {
-            return DocumentAclResult.of(parseCached(cached));
+            try {
+                return DocumentAclResult.of(parseCached(cached));
+            } catch (NumberFormatException ex) {
+                log.warn("权限缓存格式异常，重新查询权限源");
+            }
         }
 
         try {
             List<Long> ids = provider.fetchInaccessibleDocumentIds(userId);
-            Set<Long> idSet = ids == null ? new LinkedHashSet<>()
-                    : ids.stream().filter(java.util.Objects::nonNull)
-                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            if (ids == null || ids.stream().anyMatch(id -> id == null || id <= 0)) return DocumentAclResult.unresolved();
+            Set<Long> idSet = new LinkedHashSet<>(ids);
 
             safePut(cacheKey, idSet.isEmpty() ? EMPTY_SENTINEL
                     : idSet.stream().map(String::valueOf).collect(Collectors.joining(",")));
@@ -130,19 +132,14 @@ public class DocumentAclService {
     }
 
     private Set<Long> parseCached(String cached) {
-        if (!StringUtils.hasText(cached) || EMPTY_SENTINEL.equals(cached)) {
+        if (EMPTY_SENTINEL.equals(cached)) {
             return Collections.emptySet();
         }
         Set<Long> ids = new LinkedHashSet<>();
-        for (String part : cached.split(",")) {
-            String trimmed = part.trim();
-            if (!trimmed.isEmpty()) {
-                try {
-                    ids.add(Long.parseLong(trimmed));
-                } catch (NumberFormatException ignored) {
-                    // 缓存里出现脏数据时忽略该条
-                }
-            }
+        for (String part : cached.split(",", -1)) {
+            long id = Long.parseLong(part.trim());
+            if (id <= 0) throw new NumberFormatException("无效文档 ID");
+            ids.add(id);
         }
         return ids;
     }

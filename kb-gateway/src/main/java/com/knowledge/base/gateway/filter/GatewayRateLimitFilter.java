@@ -114,6 +114,12 @@ public class GatewayRateLimitFilter implements GlobalFilter, Ordered {
 
         return reactiveStringRedisTemplate.execute(SCRIPT, List.of(limitKey), args)
                 .next()
+                // 先得到一次限流决策，错误处理仅覆盖 Redis，业务异常由下游传播。
+                .switchIfEmpty(Mono.error(new IllegalStateException("Redis 未返回限流结果")))
+                .onErrorResume(error -> {
+                    log.error("Redis 限流判定失败，path={}", path, error);
+                    return Mono.just(properties.isFailOpen() ? 1L : 0L);
+                })
                 .flatMap(value -> {
                     if (value > 0) {
                         if (log.isDebugEnabled()) {
@@ -125,15 +131,6 @@ public class GatewayRateLimitFilter implements GlobalFilter, Ordered {
                     long current = -value;
                     log.warn("网关触发限流：path={}, ip={}, 当前={}/{}次每{}秒",
                             path, clientIp, current, rule.getCount(), rule.getTime());
-                    return writeLimitResponse(exchange, rule);
-                })
-                .switchIfEmpty(chain.filter(exchange))
-                .onErrorResume(e -> {
-                    if (properties.isFailOpen()) {
-                        log.error("网关限流组件异常，按 fail-open 放行：path={}, error={}", path, e.getMessage(), e);
-                        return chain.filter(exchange);
-                    }
-                    log.error("网关限流组件异常，按 fail-close 拒绝：path={}, error={}", path, e.getMessage(), e);
                     return writeLimitResponse(exchange, rule);
                 });
     }

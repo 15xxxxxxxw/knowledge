@@ -34,7 +34,7 @@ public class GlobalLogFilter implements GlobalFilter, Ordered {
         log.info("[{}] 请求 => Method: {}, URI: {}, RemoteAddress: {}",
             traceId,
             request.getMethod(),
-            request.getURI(),
+            request.getURI().getPath(),
             request.getRemoteAddress());
 
         long startTime = System.currentTimeMillis();
