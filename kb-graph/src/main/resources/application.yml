@@ -1,0 +1,82 @@
+server:
+  port: 8088
+
+spring:
+  application:
+    name: kb-graph
+  profiles:
+    active: dev
+
+  # Nacos 服务注册与发现
+  cloud:
+    nacos:
+      config:
+        namespace: knowledge
+        server-addr: 127.0.0.1:8848
+        file-extension: yaml
+        group: KNOWLEDGE_BASE
+        enabled: true
+        username: nacos
+        password: ${KB_GRAPH_PASSWORD}
+      discovery:
+        server-addr: 127.0.0.1:8848
+        namespace: knowledge
+        group: ${COMPUTER_ID:${USER:default}}
+        username: nacos
+        password: ${KB_GRAPH_PASSWORD}
+        ip: 127.0.0.1
+  config:
+    import: optional:nacos:kb-graph-dev.yaml
+
+  # Neo4j配置（KAG知识图谱）
+  neo4j:
+    uri: ${NEO4J_URI:bolt://localhost:7687}
+    authentication:
+      username: ${NEO4J_USERNAME:neo4j}
+      password: ${KB_GRAPH_PASSWORD}
+
+  # Redis配置
+  data:
+    redis:
+      host: 127.0.0.1
+      port: 6379
+      password: ${KB_GRAPH_PASSWORD}
+      database: 2
+      timeout: 10000ms
+      lettuce:
+        pool:
+          max-active: 20
+          max-wait: 3000ms
+          max-idle: 10
+          min-idle: 5
+          time-between-eviction-runs: 30s
+
+# Knife4j配置
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+  production: false
+
+# 日志配置
+logging:
+  level:
+    com.knowledge.base: debug
+    org.springframework: info
+    org.neo4j: info
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{50} - %msg%n"
+
+# ==================== 知识图谱查询缓存 ====================
+# 使用进程内 Caffeine 缓存（不是 Redis）。
+# 原因：图谱数据单次约 445KB，而 Redis 部署在远端、实测链路带宽仅 ~3Mbps，
+# 读远端缓存(1.4s)反而比直查本机 Neo4j(0.85s)更慢，属于负优化。
+# 进程内缓存无需序列化、零网络往返，命中约 0.03ms。
+#
+# 注意：进程内缓存不跨实例共享，多实例部署时数据陈旧窗口等于 ttl-seconds，
+# 因此默认只给 5 分钟（原 Redis 实现是 30 分钟）。
+kb:
+  graph:
+    cache:
+      ttl-seconds: 300
+      max-size: 64
