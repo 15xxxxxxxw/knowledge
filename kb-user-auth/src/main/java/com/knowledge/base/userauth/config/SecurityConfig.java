@@ -91,6 +91,7 @@ public class SecurityConfig {
                 // 配置授权规则
                 .authorizeHttpRequests(auth -> auth
                         // 登录、注册、邮箱验证、密码重置接口：完全开放
+                        .requestMatchers(org.springframework.http.HttpMethod.POST, "/auth/refresh").permitAll()
                         .requestMatchers("/auth/login", "/auth/register", "/auth/verify-email",
                                 "/auth/password/reset/**", "/auth/auth/**").permitAll()
                         .requestMatchers("/teams/tree").permitAll()
